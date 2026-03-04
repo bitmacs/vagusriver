@@ -1,5 +1,7 @@
 cmake_minimum_required(VERSION 3.20)
 project(demo)
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
 add_subdirectory(third-party/glfw)
 set(GLAD_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third-party/glad)
 add_library(glad STATIC ${GLAD_DIR}/src/gl.c)
