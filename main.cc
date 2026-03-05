@@ -1,5 +1,5 @@
+#include "gl.h"
 #include <GLFW/glfw3.h>
-#include <glad/gl.h>
 #include <glm/glm.hpp>
 #include <cassert>
 #include <cstdio>
@@ -17,74 +17,6 @@ std::string read_file(const char *path) {
     std::fclose(f);
     assert(nr == n);
     return s;
-}
-
-void create_texture(const GladGLContext &gl, int width, int height, GLuint &texture) {
-    gl.GenTextures(1, &texture);
-    gl.BindTexture(GL_TEXTURE_2D, texture);
-    gl.TexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
-    gl.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    gl.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-    gl.BindTexture(GL_TEXTURE_2D, 0);
-}
-
-void create_framebuffer(const GladGLContext &gl, GLuint color_tex, GLuint &fbo) {
-    gl.GenFramebuffers(1, &fbo);
-    gl.BindFramebuffer(GL_FRAMEBUFFER, fbo);
-    gl.FramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, color_tex, 0);
-    assert(gl.CheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE);
-    gl.BindFramebuffer(GL_FRAMEBUFFER, 0);
-}
-
-void create_program(const GladGLContext &gl, const char *vs_code, const char *fs_code, GLuint &program) {
-    GLuint vs = gl.CreateShader(GL_VERTEX_SHADER);
-    gl.ShaderSource(vs, 1, &vs_code, nullptr);
-    gl.CompileShader(vs);
-    {
-        GLint status;
-        gl.GetShaderiv(vs, GL_COMPILE_STATUS, &status);
-        if (status == GL_FALSE) {
-            GLint log_len;
-            gl.GetShaderiv(vs, GL_INFO_LOG_LENGTH, &log_len);
-            std::string log(log_len, '\0');
-            gl.GetShaderInfoLog(vs, log_len, &log_len, log.data());
-            fprintf(stderr, "Vertex shader compile error: %s\n", log.c_str());
-            assert(false);
-        }
-    }
-    GLuint fs = gl.CreateShader(GL_FRAGMENT_SHADER);
-    gl.ShaderSource(fs, 1, &fs_code, nullptr);
-    gl.CompileShader(fs);
-    {
-        GLint status;
-        gl.GetShaderiv(fs, GL_COMPILE_STATUS, &status);
-        if (status == GL_FALSE) {
-            GLint log_len;
-            gl.GetShaderiv(fs, GL_INFO_LOG_LENGTH, &log_len);
-            std::string log(log_len, '\0');
-            gl.GetShaderInfoLog(fs, log_len, &log_len, log.data());
-            fprintf(stderr, "Fragment shader compile error: %s\n", log.c_str());
-            assert(false);
-        }
-    }
-    program = gl.CreateProgram();
-    gl.AttachShader(program, vs);
-    gl.AttachShader(program, fs);
-    gl.LinkProgram(program);
-    {
-        GLint status;
-        gl.GetProgramiv(program, GL_LINK_STATUS, &status);
-        if (status == GL_FALSE) {
-            GLint log_len;
-            gl.GetProgramiv(program, GL_INFO_LOG_LENGTH, &log_len);
-            std::string log(log_len, '\0');
-            gl.GetProgramInfoLog(program, log_len, &log_len, log.data());
-            fprintf(stderr, "Program link error: %s\n", log.c_str());
-            assert(false);
-        }
-    }
-    gl.DeleteShader(vs);
-    gl.DeleteShader(fs);
 }
 
 struct Vertex {
@@ -158,33 +90,34 @@ int main() {
         }
     });
 
+    const float clear_color[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+
     GLuint fbo0, color_tex0;
     create_texture(gl, width, height, color_tex0);
     create_framebuffer(gl, color_tex0, fbo0);
+    clear_framebuffer(gl, fbo0, width, height, clear_color);
 
     GLuint fbo1, color_tex1;
     create_texture(gl, width, height, color_tex1);
     create_framebuffer(gl, color_tex1, fbo1);
+    clear_framebuffer(gl, fbo1, width, height, clear_color);
 
-    const float clear_color[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+    //
+    GLuint naive_gi_fbo, naive_gi_tex;
+    create_texture(gl, width, height, naive_gi_tex);
+    create_framebuffer(gl, naive_gi_tex, naive_gi_fbo);
 
-    gl.BindFramebuffer(GL_FRAMEBUFFER, fbo0);
-    gl.Viewport(0, 0, width, height);
-    gl.ClearColor(clear_color[0], clear_color[1], clear_color[2], clear_color[3]);
-    gl.Clear(GL_COLOR_BUFFER_BIT);
-
-    gl.BindFramebuffer(GL_FRAMEBUFFER, fbo1);
-    gl.Viewport(0, 0, width, height);
-    gl.ClearColor(clear_color[0], clear_color[1], clear_color[2], clear_color[3]);
-    gl.Clear(GL_COLOR_BUFFER_BIT);
-
-    gl.BindFramebuffer(GL_FRAMEBUFFER, 0);
-
-    GLuint program;
+    GLuint line_program;
+    GLuint naive_gi_program;
     {
         std::string vs_code = read_file("shaders/shader.vert");
         std::string fs_code = read_file("shaders/shader.frag");
-        create_program(gl, vs_code.c_str(), fs_code.c_str(), program);
+        create_program(gl, vs_code.c_str(), fs_code.c_str(), line_program);
+    }
+    {
+        std::string vs_code = read_file("shaders/naive-gi.vert");
+        std::string fs_code = read_file("shaders/naive-gi.frag");
+        create_program(gl, vs_code.c_str(), fs_code.c_str(), naive_gi_program);
     }
 
     GLuint quad_vao, quad_vbo, quad_ebo;
@@ -205,7 +138,6 @@ int main() {
         gl.VertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex), nullptr);
         gl.EnableVertexAttribArray(1);
         gl.VertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void *) offsetof(Vertex, uv));
-        gl.BindVertexArray(0);
     }
 
     assert(gl.GetError() == GL_NO_ERROR);
@@ -217,16 +149,17 @@ int main() {
 
         GLuint rt = (ping_pong == 0) ? fbo0 : fbo1;
         GLuint read_tex = (ping_pong == 0) ? color_tex1 : color_tex0;
+        GLuint write_tex = (ping_pong == 0) ? color_tex0 : color_tex1;
 
         gl.BindFramebuffer(GL_FRAMEBUFFER, rt);
         gl.Viewport(0, 0, width, height);
 
-        gl.UseProgram(program); // 先定 pipeline（合批按 program 分，program 切换成本高）
-        gl.Uniform2f(gl.GetUniformLocation(program, "resolution"), (float) width, (float) height);
-        gl.Uniform2f(gl.GetUniformLocation(program, "mouse_pos"), mouse_state.pos.x, mouse_state.pos.y);
-        gl.Uniform2f(gl.GetUniformLocation(program, "prev_mouse_pos"), mouse_state.prev_pos.x, mouse_state.prev_pos.y);
-        gl.Uniform1i(gl.GetUniformLocation(program, "mouse_down"), mouse_state.down[0]);
-        gl.Uniform1i(gl.GetUniformLocation(program, "color_tex"), 0);
+        gl.UseProgram(line_program); // 先定 pipeline（合批按 program 分，program 切换成本高）
+        gl.Uniform2f(gl.GetUniformLocation(line_program, "resolution"), (float) width, (float) height);
+        gl.Uniform2f(gl.GetUniformLocation(line_program, "mouse_pos"), mouse_state.pos.x, mouse_state.pos.y);
+        gl.Uniform2f(gl.GetUniformLocation(line_program, "prev_mouse_pos"), mouse_state.prev_pos.x, mouse_state.prev_pos.y);
+        gl.Uniform1i(gl.GetUniformLocation(line_program, "mouse_down"), mouse_state.down[0]);
+        gl.Uniform1i(gl.GetUniformLocation(line_program, "color_tex"), 0);
         gl.ActiveTexture(GL_TEXTURE0);
         gl.BindTexture(GL_TEXTURE_2D, read_tex);
         // gl.PolygonMode(GL_FRONT_AND_BACK, GL_LINE); // 再定光栅化状态（同 program 下可只改此项）
@@ -237,8 +170,21 @@ int main() {
 
         assert(gl.GetError() == GL_NO_ERROR);
 
-        // 当前帧结果在 rt 里，blit 到窗口
-        gl.BindFramebuffer(GL_READ_FRAMEBUFFER, rt);
+        // naive GI pass
+        {
+            gl.BindFramebuffer(GL_FRAMEBUFFER, naive_gi_fbo);
+            gl.Viewport(0, 0, width, height);
+            gl.UseProgram(naive_gi_program);
+            gl.Uniform2f(gl.GetUniformLocation(naive_gi_program, "resolution"), (float) width, (float) height);
+            gl.Uniform1i(gl.GetUniformLocation(naive_gi_program, "color_tex"), 0);
+            gl.ActiveTexture(GL_TEXTURE0);
+            gl.BindTexture(GL_TEXTURE_2D, write_tex);
+            gl.BindVertexArray(quad_vao);
+            gl.DrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, nullptr);
+            assert(gl.GetError() == GL_NO_ERROR);
+        }
+
+        gl.BindFramebuffer(GL_READ_FRAMEBUFFER, naive_gi_fbo);
         gl.BindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
         gl.BlitFramebuffer(0, 0, width, height, 0, 0, width, height, GL_COLOR_BUFFER_BIT, GL_NEAREST);
 
@@ -249,7 +195,8 @@ int main() {
     gl.DeleteVertexArrays(1, &quad_vao);
     gl.DeleteBuffers(1, &quad_ebo);
     gl.DeleteBuffers(1, &quad_vbo);
-    gl.DeleteProgram(program);
+    gl.DeleteProgram(naive_gi_program);
+    gl.DeleteProgram(line_program);
     gl.DeleteFramebuffers(1, &fbo1);
     gl.DeleteTextures(1, &color_tex1);
     gl.DeleteFramebuffers(1, &fbo0);
