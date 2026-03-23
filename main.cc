@@ -1,7 +1,9 @@
 #include <GLFW/glfw3.h>
 #include <glad/gl.h>
 #include <glm/glm.hpp>
+#include <algorithm>
 #include <cassert>
+#include <cmath>
 #include <cstdio>
 #include <string>
 
@@ -19,12 +21,14 @@ std::string read_file(const char *path) {
     return s;
 }
 
-void create_texture(const GladGLContext &gl, int width, int height, GLuint &texture) {
+void create_texture(const GladGLContext &gl, int width, int height, GLint internal_format, GLenum format, GLenum type, GLuint &texture) {
     gl.GenTextures(1, &texture);
     gl.BindTexture(GL_TEXTURE_2D, texture);
-    gl.TexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+    gl.TexImage2D(GL_TEXTURE_2D, 0, internal_format, width, height, 0, format, type, nullptr);
     gl.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
     gl.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    gl.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    gl.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     gl.BindTexture(GL_TEXTURE_2D, 0);
 }
 
@@ -34,6 +38,15 @@ void create_framebuffer(const GladGLContext &gl, GLuint color_tex, GLuint &fbo) 
     gl.FramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, color_tex, 0);
     assert(gl.CheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE);
     gl.BindFramebuffer(GL_FRAMEBUFFER, 0);
+}
+
+int smallest_power_of_two_greater_or_equal(int value) {
+    assert(value > 0);
+    int power = 1;
+    while (power < value) {
+        power <<= 1;
+    }
+    return power;
 }
 
 void create_program(const GladGLContext &gl, const char *vs_code, const char *fs_code, GLuint &program) {
@@ -85,6 +98,14 @@ void create_program(const GladGLContext &gl, const char *vs_code, const char *fs
     }
     gl.DeleteShader(vs);
     gl.DeleteShader(fs);
+}
+
+GLuint create_program_from_files(const GladGLContext &gl, const char *vs_path, const char *fs_path) {
+    std::string vs_code = read_file(vs_path);
+    std::string fs_code = read_file(fs_path);
+    GLuint program;
+    create_program(gl, vs_code.c_str(), fs_code.c_str(), program);
+    return program;
 }
 
 struct Vertex {
@@ -159,14 +180,14 @@ int main() {
     });
 
     GLuint fbo0, color_tex0;
-    create_texture(gl, width, height, color_tex0);
+    create_texture(gl, width, height, GL_RGBA8, GL_RGBA, GL_UNSIGNED_BYTE, color_tex0);
     create_framebuffer(gl, color_tex0, fbo0);
 
     GLuint fbo1, color_tex1;
-    create_texture(gl, width, height, color_tex1);
+    create_texture(gl, width, height, GL_RGBA8, GL_RGBA, GL_UNSIGNED_BYTE, color_tex1);
     create_framebuffer(gl, color_tex1, fbo1);
 
-    const float clear_color[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+    const float clear_color[4] = {0.0f, 0.0f, 0.0f, 0.0f};
 
     gl.BindFramebuffer(GL_FRAMEBUFFER, fbo0);
     gl.Viewport(0, 0, width, height);
@@ -180,12 +201,11 @@ int main() {
 
     gl.BindFramebuffer(GL_FRAMEBUFFER, 0);
 
-    GLuint program;
-    {
-        std::string vs_code = read_file("shaders/shader.vert");
-        std::string fs_code = read_file("shaders/shader.frag");
-        create_program(gl, vs_code.c_str(), fs_code.c_str(), program);
-    }
+    GLuint line_program = create_program_from_files(gl, "shaders/shader.vert", "shaders/line.frag");
+    GLuint seed_program = create_program_from_files(gl, "shaders/shader.vert", "shaders/seed.frag");
+    GLuint jfa_program = create_program_from_files(gl, "shaders/shader.vert", "shaders/jfa.frag");
+    GLuint distance_program = create_program_from_files(gl, "shaders/shader.vert", "shaders/distance.frag");
+    GLuint display_program = create_program_from_files(gl, "shaders/shader.vert", "shaders/display.frag");
 
     GLuint quad_vao, quad_vbo, quad_ebo;
     gl.GenVertexArrays(1, &quad_vao);
@@ -210,46 +230,119 @@ int main() {
 
     assert(gl.GetError() == GL_NO_ERROR);
 
+    GLuint seed_tex[2];
+    GLuint seed_fbo[2];
+    for (int i = 0; i < 2; ++i) {
+        create_texture(gl, width, height, GL_RG32F, GL_RG, GL_FLOAT, seed_tex[i]);
+        create_framebuffer(gl, seed_tex[i], seed_fbo[i]);
+    }
+
+    GLuint distance_tex;
+    GLuint distance_fbo;
+    create_texture(gl, width, height, GL_R32F, GL_RED, GL_FLOAT, distance_tex);
+    create_framebuffer(gl, distance_tex, distance_fbo);
+
     int ping_pong = 0;  // 0: 画到 fbo0，采样 tex1；1: 画到 fbo1，采样 tex0
+    float max_distance = std::sqrt(static_cast<float>(width * width + height * height));
 
     while (!glfwWindowShouldClose(window)) {
         glfwPollEvents();
 
-        GLuint rt = (ping_pong == 0) ? fbo0 : fbo1;
-        GLuint read_tex = (ping_pong == 0) ? color_tex1 : color_tex0;
+        int write_index = ping_pong;
+        int read_index = 1 - ping_pong;
+        GLuint line_fbo = (write_index == 0) ? fbo0 : fbo1;
+        GLuint line_target_tex = (write_index == 0) ? color_tex0 : color_tex1;
+        GLuint history_tex = (read_index == 0) ? color_tex0 : color_tex1;
 
-        gl.BindFramebuffer(GL_FRAMEBUFFER, rt);
+        gl.BindFramebuffer(GL_FRAMEBUFFER, line_fbo);
         gl.Viewport(0, 0, width, height);
 
-        gl.UseProgram(program); // 先定 pipeline（合批按 program 分，program 切换成本高）
-        gl.Uniform2f(gl.GetUniformLocation(program, "resolution"), (float) width, (float) height);
-        gl.Uniform2f(gl.GetUniformLocation(program, "mouse_pos"), mouse_state.pos.x, mouse_state.pos.y);
-        gl.Uniform2f(gl.GetUniformLocation(program, "prev_mouse_pos"), mouse_state.prev_pos.x, mouse_state.prev_pos.y);
-        gl.Uniform1i(gl.GetUniformLocation(program, "mouse_down"), mouse_state.down[0]);
-        gl.Uniform1i(gl.GetUniformLocation(program, "color_tex"), 0);
+        gl.UseProgram(line_program);
+        gl.Uniform2f(gl.GetUniformLocation(line_program, "resolution"), (float) width, (float) height);
+        gl.Uniform2f(gl.GetUniformLocation(line_program, "mouse_pos"), mouse_state.pos.x, mouse_state.pos.y);
+        gl.Uniform2f(gl.GetUniformLocation(line_program, "prev_mouse_pos"), mouse_state.prev_pos.x, mouse_state.prev_pos.y);
+        gl.Uniform1i(gl.GetUniformLocation(line_program, "mouse_down"), mouse_state.down[0]);
+        gl.Uniform1i(gl.GetUniformLocation(line_program, "color_tex"), 0);
         gl.ActiveTexture(GL_TEXTURE0);
-        gl.BindTexture(GL_TEXTURE_2D, read_tex);
-        // gl.PolygonMode(GL_FRONT_AND_BACK, GL_LINE); // 再定光栅化状态（同 program 下可只改此项）
+        gl.BindTexture(GL_TEXTURE_2D, history_tex);
         gl.BindVertexArray(quad_vao);
         gl.DrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, nullptr);
-
-        ping_pong = 1 - ping_pong;  // 下一帧交换
-
         assert(gl.GetError() == GL_NO_ERROR);
 
-        // 当前帧结果在 rt 里，blit 到窗口
-        gl.BindFramebuffer(GL_READ_FRAMEBUFFER, rt);
-        gl.BindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
-        gl.BlitFramebuffer(0, 0, width, height, 0, 0, width, height, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+        ping_pong = read_index;
+
+        gl.BindFramebuffer(GL_FRAMEBUFFER, seed_fbo[0]);
+        gl.Viewport(0, 0, width, height);
+        gl.UseProgram(seed_program);
+        gl.Uniform2f(gl.GetUniformLocation(seed_program, "resolution"), (float) width, (float) height);
+        gl.Uniform1i(gl.GetUniformLocation(seed_program, "line_tex"), 0);
+        gl.ActiveTexture(GL_TEXTURE0);
+        gl.BindTexture(GL_TEXTURE_2D, line_target_tex);
+        gl.BindVertexArray(quad_vao);
+        gl.DrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, nullptr);
+        assert(gl.GetError() == GL_NO_ERROR);
+
+        int seed_index = 0;
+        int next_seed_index = 1;
+        int max_dim = std::max(width, height);
+        int step_bound = smallest_power_of_two_greater_or_equal(max_dim);
+        for (int step = step_bound / 2; step >= 1; step /= 2) {
+            gl.BindFramebuffer(GL_FRAMEBUFFER, seed_fbo[next_seed_index]);
+            gl.Viewport(0, 0, width, height);
+            gl.UseProgram(jfa_program);
+            gl.Uniform2f(gl.GetUniformLocation(jfa_program, "resolution"), (float) width, (float) height);
+            gl.Uniform1f(gl.GetUniformLocation(jfa_program, "step_pixels"), static_cast<float>(step));
+            gl.Uniform1i(gl.GetUniformLocation(jfa_program, "seed_tex"), 0);
+            gl.ActiveTexture(GL_TEXTURE0);
+            gl.BindTexture(GL_TEXTURE_2D, seed_tex[seed_index]);
+            gl.BindVertexArray(quad_vao);
+            gl.DrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, nullptr);
+            assert(gl.GetError() == GL_NO_ERROR);
+            std::swap(seed_index, next_seed_index);
+        }
+
+        gl.BindFramebuffer(GL_FRAMEBUFFER, distance_fbo);
+        gl.Viewport(0, 0, width, height);
+        gl.UseProgram(distance_program);
+        gl.Uniform2f(gl.GetUniformLocation(distance_program, "resolution"), (float) width, (float) height);
+        gl.Uniform1i(gl.GetUniformLocation(distance_program, "seed_tex"), 0);
+        gl.ActiveTexture(GL_TEXTURE0);
+        gl.BindTexture(GL_TEXTURE_2D, seed_tex[seed_index]);
+        gl.BindVertexArray(quad_vao);
+        gl.DrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, nullptr);
+        assert(gl.GetError() == GL_NO_ERROR);
 
         gl.BindFramebuffer(GL_FRAMEBUFFER, 0);
+        gl.Viewport(0, 0, width, height);
+        gl.UseProgram(display_program);
+        gl.Uniform1f(gl.GetUniformLocation(display_program, "max_distance"), max_distance);
+        gl.Uniform1i(gl.GetUniformLocation(display_program, "distance_tex"), 0);
+        gl.Uniform1i(gl.GetUniformLocation(display_program, "line_tex"), 1);
+        gl.ActiveTexture(GL_TEXTURE0);
+        gl.BindTexture(GL_TEXTURE_2D, distance_tex);
+        gl.ActiveTexture(GL_TEXTURE1);
+        gl.BindTexture(GL_TEXTURE_2D, line_target_tex);
+        gl.BindVertexArray(quad_vao);
+        gl.DrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, nullptr);
+        assert(gl.GetError() == GL_NO_ERROR);
+
         glfwSwapBuffers(window);
     }
 
+    gl.DeleteFramebuffers(1, &distance_fbo);
+    gl.DeleteTextures(1, &distance_tex);
+    for (int i = 1; i >= 0; --i) {
+        gl.DeleteFramebuffers(1, &seed_fbo[i]);
+        gl.DeleteTextures(1, &seed_tex[i]);
+    }
     gl.DeleteVertexArrays(1, &quad_vao);
     gl.DeleteBuffers(1, &quad_ebo);
     gl.DeleteBuffers(1, &quad_vbo);
-    gl.DeleteProgram(program);
+    gl.DeleteProgram(display_program);
+    gl.DeleteProgram(distance_program);
+    gl.DeleteProgram(jfa_program);
+    gl.DeleteProgram(seed_program);
+    gl.DeleteProgram(line_program);
     gl.DeleteFramebuffers(1, &fbo1);
     gl.DeleteTextures(1, &color_tex1);
     gl.DeleteFramebuffers(1, &fbo0);
