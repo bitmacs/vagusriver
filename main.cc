@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cassert>
 #include <cmath>
+#include <random>
 #include <cstdio>
 #include <string>
 
@@ -29,7 +30,6 @@ void create_texture(const GladGLContext &gl, int width, int height, GLint intern
     gl.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
     gl.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     gl.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    gl.BindTexture(GL_TEXTURE_2D, 0);
 }
 
 void create_framebuffer(const GladGLContext &gl, GLuint color_tex, GLuint &fbo) {
@@ -37,7 +37,6 @@ void create_framebuffer(const GladGLContext &gl, GLuint color_tex, GLuint &fbo) 
     gl.BindFramebuffer(GL_FRAMEBUFFER, fbo);
     gl.FramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, color_tex, 0);
     assert(gl.CheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE);
-    gl.BindFramebuffer(GL_FRAMEBUFFER, 0);
 }
 
 int smallest_power_of_two_greater_or_equal(int value) {
@@ -130,6 +129,9 @@ struct MouseState {
 };
 
 static MouseState mouse_state = {};
+static glm::vec3 brush_color = {1.0f, 0.0f, 0.0f};
+static std::mt19937 rng{std::random_device{}()};
+static std::uniform_real_distribution<float> d(0.0f, 1.0f);
 
 int main() {
     int status = glfwInit();
@@ -174,6 +176,9 @@ int main() {
     glfwSetMouseButtonCallback(window, [](GLFWwindow *w, int button, int action, int mods) {
         if (action == GLFW_PRESS) {
             mouse_state.down[button] = true;
+            if (button == 0) {
+                brush_color = glm::vec3(d(rng), d(rng), d(rng));
+            }
         } else if (action == GLFW_RELEASE) {
             mouse_state.down[button] = false;
         }
@@ -199,12 +204,11 @@ int main() {
     gl.ClearColor(clear_color[0], clear_color[1], clear_color[2], clear_color[3]);
     gl.Clear(GL_COLOR_BUFFER_BIT);
 
-    gl.BindFramebuffer(GL_FRAMEBUFFER, 0);
-
     GLuint line_program = create_program_from_files(gl, "shaders/shader.vert", "shaders/line.frag");
     GLuint seed_program = create_program_from_files(gl, "shaders/shader.vert", "shaders/seed.frag");
     GLuint jfa_program = create_program_from_files(gl, "shaders/shader.vert", "shaders/jfa.frag");
     GLuint distance_program = create_program_from_files(gl, "shaders/shader.vert", "shaders/distance.frag");
+    GLuint gi_program = create_program_from_files(gl, "shaders/shader.vert", "shaders/gi.frag");
     GLuint display_program = create_program_from_files(gl, "shaders/shader.vert", "shaders/display.frag");
 
     GLuint quad_vao, quad_vbo, quad_ebo;
@@ -242,6 +246,11 @@ int main() {
     create_texture(gl, width, height, GL_R32F, GL_RED, GL_FLOAT, distance_tex);
     create_framebuffer(gl, distance_tex, distance_fbo);
 
+    GLuint gi_tex;
+    GLuint gi_fbo;
+    create_texture(gl, width, height, GL_RGBA32F, GL_RGBA, GL_FLOAT, gi_tex);
+    create_framebuffer(gl, gi_tex, gi_fbo);
+
     int ping_pong = 0;  // 0: 画到 fbo0，采样 tex1；1: 画到 fbo1，采样 tex0
     float max_distance = std::sqrt(static_cast<float>(width * width + height * height));
 
@@ -262,6 +271,7 @@ int main() {
         gl.Uniform2f(gl.GetUniformLocation(line_program, "mouse_pos"), mouse_state.pos.x, mouse_state.pos.y);
         gl.Uniform2f(gl.GetUniformLocation(line_program, "prev_mouse_pos"), mouse_state.prev_pos.x, mouse_state.prev_pos.y);
         gl.Uniform1i(gl.GetUniformLocation(line_program, "mouse_down"), mouse_state.down[0]);
+        gl.Uniform3f(gl.GetUniformLocation(line_program, "brush_color"), brush_color.x, brush_color.y, brush_color.z);
         gl.Uniform1i(gl.GetUniformLocation(line_program, "color_tex"), 0);
         gl.ActiveTexture(GL_TEXTURE0);
         gl.BindTexture(GL_TEXTURE_2D, history_tex);
@@ -274,7 +284,6 @@ int main() {
         gl.BindFramebuffer(GL_FRAMEBUFFER, seed_fbo[0]);
         gl.Viewport(0, 0, width, height);
         gl.UseProgram(seed_program);
-        gl.Uniform2f(gl.GetUniformLocation(seed_program, "resolution"), (float) width, (float) height);
         gl.Uniform1i(gl.GetUniformLocation(seed_program, "line_tex"), 0);
         gl.ActiveTexture(GL_TEXTURE0);
         gl.BindTexture(GL_TEXTURE_2D, line_target_tex);
@@ -304,13 +313,28 @@ int main() {
         gl.BindFramebuffer(GL_FRAMEBUFFER, distance_fbo);
         gl.Viewport(0, 0, width, height);
         gl.UseProgram(distance_program);
-        gl.Uniform2f(gl.GetUniformLocation(distance_program, "resolution"), (float) width, (float) height);
         gl.Uniform1i(gl.GetUniformLocation(distance_program, "seed_tex"), 0);
         gl.ActiveTexture(GL_TEXTURE0);
         gl.BindTexture(GL_TEXTURE_2D, seed_tex[seed_index]);
         gl.BindVertexArray(quad_vao);
         gl.DrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, nullptr);
         assert(gl.GetError() == GL_NO_ERROR);
+
+        {
+            gl.BindFramebuffer(GL_FRAMEBUFFER, gi_fbo);
+            gl.Viewport(0, 0, width, height);
+            gl.UseProgram(gi_program);
+            gl.Uniform1i(gl.GetUniformLocation(gi_program, "scene_tex"), 0);
+            gl.Uniform1i(gl.GetUniformLocation(gi_program, "distance_tex"), 1);
+            gl.Uniform1f(gl.GetUniformLocation(gi_program, "rand_seed"), d(rng));
+            gl.ActiveTexture(GL_TEXTURE0);
+            gl.BindTexture(GL_TEXTURE_2D, line_target_tex);
+            gl.ActiveTexture(GL_TEXTURE1);
+            gl.BindTexture(GL_TEXTURE_2D, distance_tex);
+            gl.BindVertexArray(quad_vao);
+            gl.DrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, nullptr);
+            assert(gl.GetError() == GL_NO_ERROR);
+        }
 
         gl.BindFramebuffer(GL_FRAMEBUFFER, 0);
         gl.Viewport(0, 0, width, height);
@@ -319,7 +343,7 @@ int main() {
         gl.Uniform1i(gl.GetUniformLocation(display_program, "distance_tex"), 0);
         gl.Uniform1i(gl.GetUniformLocation(display_program, "line_tex"), 1);
         gl.ActiveTexture(GL_TEXTURE0);
-        gl.BindTexture(GL_TEXTURE_2D, distance_tex);
+        gl.BindTexture(GL_TEXTURE_2D, gi_tex);
         gl.ActiveTexture(GL_TEXTURE1);
         gl.BindTexture(GL_TEXTURE_2D, line_target_tex);
         gl.BindVertexArray(quad_vao);
@@ -329,6 +353,8 @@ int main() {
         glfwSwapBuffers(window);
     }
 
+    gl.DeleteFramebuffers(1, &gi_fbo);
+    gl.DeleteTextures(1, &gi_tex);
     gl.DeleteFramebuffers(1, &distance_fbo);
     gl.DeleteTextures(1, &distance_tex);
     for (int i = 1; i >= 0; --i) {
@@ -339,6 +365,7 @@ int main() {
     gl.DeleteBuffers(1, &quad_ebo);
     gl.DeleteBuffers(1, &quad_vbo);
     gl.DeleteProgram(display_program);
+    gl.DeleteProgram(gi_program);
     gl.DeleteProgram(distance_program);
     gl.DeleteProgram(jfa_program);
     gl.DeleteProgram(seed_program);

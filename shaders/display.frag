@@ -9,6 +9,10 @@ uniform float max_distance;
 in vec2 v_uv;
 
 void main() {
+    {
+        FragColor = texture(distance_tex, v_uv);
+        return;
+    }
     float distance_value = texture(distance_tex, v_uv).r;
     float normalized = distance_value / max_distance;
     float shade = 1.0 - clamp(normalized, 0.0, 1.0);

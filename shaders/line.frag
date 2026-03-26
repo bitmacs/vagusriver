@@ -16,6 +16,7 @@ uniform vec2 prev_mouse_pos;
 uniform bool mouse_down;
 
 uniform sampler2D color_tex;
+uniform vec3 brush_color;
 
 in vec2 v_uv;
 
@@ -28,7 +29,7 @@ void main() {
         b.y = resolution.y - b.y;
         float radius_squared = 10.0f * 10.0f;
         if (sdf_line_squared(v_uv * resolution, a, b) <= radius_squared) {
-            color = vec4(1.0, 0.0, 0.0, 1.0);
+            color = vec4(brush_color, 1.0);
         }
     }
     FragColor = color;
